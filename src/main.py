@@ -71,9 +71,9 @@ class FruitFlyAgent:
 
         # Activate some sensory neurons based on input length
         self.simulator.run_simulation(
-            duration=0.1*b2.second,
+            duration=0.1,
             input_neurons=list(range(min(num_input_neurons, 20))),
-            input_current=1*b2.pamp
+            input_current=5
         )
 
     def run_interaction_loop(self):
