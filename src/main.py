@@ -15,7 +15,6 @@ from connectome_simulator import ConnectomeSimulator
 from neural_interpreter import NeuralInterpreter
 from claude_integration import ClaudeIntegration
 from terminal_ui import FlyTerminalUI
-import brian2 as b2
 
 
 class FruitFlyAgent:

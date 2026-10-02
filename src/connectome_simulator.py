@@ -1,14 +1,13 @@
 """
 Fruit Fly Connectome Neural Simulator
 
-Loads the real FlyEM connectome and simulates neural dynamics using brian2.
+Loads the real FlyEM connectome and simulates neural dynamics using NumPy.
 """
 
 import numpy as np
 import json
 from pathlib import Path
-import brian2 as b2
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import requests
 
 
@@ -24,11 +23,14 @@ class ConnectomeSimulator:
         """
         self.connectome_path = connectome_path or "data/connectome/flyem_connectome.json"
         self.connectome = None
-        self.neurons = None
-        self.synapses = None
-        self.spike_mon = None
-        self.v_mon = None
-        self.neuron_states = {}
+        self.neuron_voltages = None
+        self.neuron_conductance = None
+        self.connectivity = None
+        self.synapse_types = None
+        self.spike_history = []
+        self.neurons_count = 0
+        self.dt = 0.0001  # Time step in seconds
+        self.time = 0
 
     def load_connectome(self):
         """Load connectome data from JSON file."""
@@ -45,12 +47,8 @@ class ConnectomeSimulator:
         """Download simplified connectome data (in production, fetch from FlyEM)."""
         Path(self.connectome_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # For now, create a simplified connectome structure
-        # In production, this would fetch from FlyEM database
         print("📥 Creating connectome structure...")
 
-        # Simplified connectome with ~100 neurons for testing
-        # In full version, this would be 3000+ neurons
         num_neurons = 100
 
         connectome = {
@@ -68,9 +66,7 @@ class ConnectomeSimulator:
             "synapses": []
         }
 
-        # Create random connections
         for i in range(num_neurons):
-            # Each neuron connects to 3-5 other neurons on average
             targets = np.random.choice(
                 [j for j in range(num_neurons) if j != i],
                 size=np.random.randint(3, 6),
@@ -89,114 +85,125 @@ class ConnectomeSimulator:
 
         print(f"✓ Created connectome: {len(connectome['neurons'])} neurons, {len(connectome['synapses'])} synapses")
 
-    def build_network(self, dt=0.1*b2.ms):
-        """Build the brian2 neural network from connectome."""
-        b2.start_scope()
-
+    def build_network(self):
+        """Build the neural network from connectome using NumPy."""
         if not self.connectome:
             self.load_connectome()
 
         num_neurons = len(self.connectome['neurons'])
 
-        # Neuron equations
-        eqs = '''
-        dv/dt = (g_leak * (E_leak - v) + g_syn * (v_syn - v)) / C_m : volt
-        dg_syn/dt = -g_syn / tau_syn : siemens
-        v_syn : volt
-        '''
+        self.neuron_voltages = -70 + np.random.randn(num_neurons) * 5
+        self.neuron_conductance = np.zeros(num_neurons)
+        self.spike_history = []
 
-        # Create neuron group
-        self.neurons = b2.NeuronGroup(
-            num_neurons,
-            eqs,
-            method='exponential_euler',
-            namespace={
-                'E_leak': -70*b2.mV,
-                'g_leak': 0.1*b2.nsiemens,
-                'C_m': 100*b2.pfarad,
-                'tau_syn': 5*b2.ms
-            }
-        )
+        self.connectivity = np.zeros((num_neurons, num_neurons))
+        self.synapse_types = np.zeros((num_neurons, num_neurons))
 
-        # Initialize potentials
-        self.neurons.v = -70*b2.mV + np.random.randn(num_neurons) * 5 * b2.mV
-        self.neurons.v_syn = -70*b2.mV
-
-        # Create synapses
-        synapses_list = self.connectome['synapses']
-
-        syn_eqs = '''
-        w : 1
-        is_inhibitory : boolean
-        '''
-
-        self.synapses = b2.Synapses(
-            self.neurons,
-            self.neurons,
-            syn_eqs,
-            on_pre='g_syn += w * nsiemens'
-        )
-
-        # Add connections
-        for syn in synapses_list:
+        for syn in self.connectome['synapses']:
             source = syn['source']
             target = syn['target']
             weight = syn['weight']
-            is_inhibitory = syn['type'] == 'inhibitory'
+            is_inhibitory = -1 if syn['type'] == 'inhibitory' else 1
 
-            self.synapses.connect(i=source, j=target)
-            idx = len(self.synapses) - 1
-            self.synapses.w[idx] = weight
-            self.synapses.is_inhibitory[idx] = is_inhibitory
+            self.connectivity[source, target] = weight
+            self.synapse_types[source, target] = is_inhibitory
 
-        # Monitors
-        self.spike_mon = b2.SpikeMonitor(self.neurons)
-        self.v_mon = b2.StateMonitor(self.neurons, 'v', record=True)
+        self.neurons_count = num_neurons
+        print(f"✓ Neural network built: {num_neurons} neurons, {len(self.connectome['synapses'])} synapses")
 
-        print(f"✓ Neural network built: {self.neurons.N} neurons, {len(self.synapses)} synapses")
+    def step(self, input_current=None):
+        """Run one simulation step of neural dynamics."""
+        if self.neuron_voltages is None:
+            self.build_network()
 
-    def run_simulation(self, duration=1*b2.second, input_neurons=None, input_current=None):
+        num_neurons = self.neurons_count
+
+        E_leak = -70
+        g_leak = 0.1
+        C_m = 100
+        tau_syn = 0.005
+
+        dv = (g_leak * (E_leak - self.neuron_voltages) + self.neuron_conductance * (0 - self.neuron_voltages)) / C_m
+        self.neuron_voltages += dv * self.dt
+
+        self.neuron_conductance *= np.exp(-self.dt / tau_syn)
+
+        spike_threshold = -20
+        spiked = self.neuron_voltages > spike_threshold
+
+        if np.any(spiked):
+            spike_neurons = np.where(spiked)[0]
+            self.spike_history.append((self.time, spike_neurons.tolist()))
+
+            for neuron_id in spike_neurons:
+                targets = np.where(self.connectivity[neuron_id, :] > 0)[0]
+                for target in targets:
+                    weight = self.connectivity[neuron_id, target]
+                    sign = self.synapse_types[neuron_id, target]
+                    self.neuron_conductance[target] += weight * sign
+
+                self.neuron_voltages[neuron_id] = -70
+
+        if input_current is not None:
+            self.neuron_voltages += input_current
+
+        self.time += self.dt
+
+    def run_simulation(self, duration=0.1, input_neurons=None, input_current=None):
         """
         Run simulation with optional sensory input.
 
         Args:
-            duration: How long to simulate
+            duration: How long to simulate (seconds)
             input_neurons: List of neuron indices to stimulate
-            input_current: Current to inject (in amperes)
+            input_current: Current to inject (mV)
         """
-        if self.neurons is None:
+        if self.neuron_voltages is None:
             self.build_network()
 
-        if input_neurons and input_current:
-            # Inject current into sensory neurons
-            for idx in input_neurons:
-                self.neurons.v[idx] += input_current
+        steps = int(duration / self.dt)
 
-        b2.run(duration)
+        for step in range(steps):
+            if input_neurons and input_current and step < 100:
+                curr = np.zeros(self.neurons_count)
+                for idx in input_neurons:
+                    if idx < self.neurons_count:
+                        curr[idx] = input_current
+                self.step(curr)
+            else:
+                self.step()
 
     def get_neural_state(self) -> Dict:
         """Get current neural activity state."""
-        if self.spike_mon is None:
-            return {}
+        if self.spike_history is None or len(self.spike_history) == 0:
+            return {
+                'active_neurons': [],
+                'spike_counts': [0] * self.neurons_count,
+                'voltages': self.neuron_voltages.tolist() if self.neuron_voltages is not None else [],
+                'num_active': 0
+            }
 
-        # Count recent spikes
-        spike_counts = np.bincount(self.spike_mon.i, minlength=self.neurons.N)
+        recent_spikes = []
+        if len(self.spike_history) > 0:
+            last_time, spikes = self.spike_history[-1]
+            recent_spikes = spikes
 
-        # Get voltage states
-        voltages = self.v_mon.v[:, -1] / b2.mV  # Last recorded voltage
-
-        # Identify active neurons (recently spiked or high voltage)
-        active_neurons = np.where(spike_counts > 0)[0]
+        spike_counts = np.zeros(self.neurons_count)
+        for _, spikes in self.spike_history[-100:]:
+            for neuron_id in spikes:
+                spike_counts[neuron_id] += 1
 
         return {
-            'active_neurons': active_neurons.tolist(),
+            'active_neurons': recent_spikes,
             'spike_counts': spike_counts.tolist(),
-            'voltages': voltages.tolist(),
-            'num_active': len(active_neurons)
+            'voltages': self.neuron_voltages.tolist() if self.neuron_voltages is not None else [],
+            'num_active': len(recent_spikes)
         }
 
     def reset(self):
         """Reset the simulation."""
-        if self.neurons:
-            self.neurons.v = -70*b2.mV + np.random.randn(self.neurons.N) * 5 * b2.mV
-            self.neurons.v_syn = -70*b2.mV
+        if self.neuron_voltages is not None:
+            self.neuron_voltages = -70 + np.random.randn(self.neurons_count) * 5
+            self.neuron_conductance = np.zeros(self.neurons_count)
+            self.spike_history = []
+            self.time = 0
